@@ -1,0 +1,367 @@
+diff -u /tmp/dmenu-5.3/dmenu.1 ./dmenu.1
+--- /tmp/dmenu-5.3/dmenu.1	2024-03-19 19:25:09.000000000 +0800
++++ ./dmenu.1	2024-04-23 22:46:53.408331870 +0800
+@@ -8,6 +8,12 @@
+ .IR lines ]
+ .RB [ \-m
+ .IR monitor ]
++.RB [ \-x
++.IR xoffset ]
++.RB [ \-y
++.IR yoffset ]
++.RB [ \-z
++.IR width ]
+ .RB [ \-p
+ .IR prompt ]
+ .RB [ \-fn
+@@ -22,6 +28,10 @@
+ .IR color ]
+ .RB [ \-w
+ .IR windowid ]
++.RB [ \-d
++.IR separator ]
++.RB [ \-D
++.IR separator ]
+ .P
+ .BR dmenu_run " ..."
+ .SH DESCRIPTION
+@@ -54,6 +64,24 @@
+ dmenu is displayed on the monitor number supplied. Monitor numbers are starting
+ from 0.
+ .TP
++.BI \-x " xoffset"
++dmenu is placed at this offset measured from the left side of the monitor.
++Can be negative.
++If option
++.B \-m
++is present, the measurement will use the given monitor.
++.TP
++.BI \-y " yoffset"
++dmenu is placed at this offset measured from the top of the monitor.  If the
++.B \-b
++option is used, the offset is measured from the bottom.  Can be negative.
++If option
++.B \-m
++is present, the measurement will use the given monitor.
++.TP
++.BI \-z " width"
++sets the width of the dmenu window.
++.TP
+ .BI \-p " prompt"
+ defines the prompt to be displayed to the left of the input field.
+ .TP
+@@ -80,6 +108,14 @@
+ .TP
+ .BI \-w " windowid"
+ embed into windowid.
++.TP
++.BI \-d " separator"
++separate the input into two halves on the first occurrence of the given charcter.
++Display only the first half in dmenu and print the second half to stdout upon selection.
++Appending '|' to the separator reverses the display/printing order.
++.TP
++.BI \-D " separator"
++same as \-d but separate based on the last occurrence.
+ .SH USAGE
+ dmenu is completely controlled by the keyboard.  Items are selected using the
+ arrow keys, page up, page down, home, and end.
+diff -u /tmp/dmenu-5.3/dmenu.c ./dmenu.c
+--- /tmp/dmenu-5.3/dmenu.c	2024-03-19 19:25:09.000000000 +0800
++++ ./dmenu.c	2024-04-23 22:49:40.797342455 +0800
+@@ -29,13 +29,19 @@
+ 
+ struct item {
+ 	char *text;
++	char *text_output;
+ 	struct item *left, *right;
+ 	int out;
+ };
+ 
+ static char text[BUFSIZ] = "";
+ static char *embed;
++static char separator, separator_reverse;
++static char * (*sepchr)(const char *, int);
+ static int bh, mw, mh;
++static int dmx = 0; /* put dmenu at this x offset */
++static int dmy = 0; /* put dmenu at this y offset (measured from the bottom if topbar is 0) */
++static unsigned int dmw = 0; /* make dmenu this wide */
+ static int inputw = 0, promptw;
+ static int lrpad; /* sum of left and right padding */
+ static size_t cursor;
+@@ -104,7 +110,7 @@
+ 	for (i = 0; i < SchemeLast; i++)
+ 		free(scheme[i]);
+ 	for (i = 0; items && items[i].text; ++i)
+-		free(items[i].text);
++		free(separator_reverse ? items[i].text_output : items[i].text);
+ 	free(items);
+ 	drw_free(drw);
+ 	XSync(dpy, False);
+@@ -489,7 +495,7 @@
+ 		break;
+ 	case XK_Return:
+ 	case XK_KP_Enter:
+-		puts((sel && !(ev->state & ShiftMask)) ? sel->text : text);
++		puts((sel && !(ev->state & ShiftMask)) ? sel->text_output : text);
+ 		if (!(ev->state & ControlMask)) {
+ 			cleanup();
+ 			exit(0);
+@@ -528,6 +534,142 @@
+ }
+ 
+ static void
++buttonpress(XEvent *e)
++{
++	struct item *item;
++	XButtonPressedEvent *ev = &e->xbutton;
++	int x = 0, y = 0, h = bh, w;
++
++	if (ev->window != win)
++		return;
++
++	/* right-click: exit */
++	if (ev->button == Button3)
++		exit(1);
++
++	if (prompt && *prompt)
++		x += promptw;
++
++	/* input field */
++	w = (lines > 0 || !matches) ? mw - x : inputw;
++
++	/* left-click on input: clear input,
++	 * NOTE: if there is no left-arrow the space for < is reserved so
++	 *       add that to the input width */
++	if (ev->button == Button1 &&
++	   ((lines <= 0 && ev->x >= 0 && ev->x <= x + w +
++	   ((!prev || !curr->left) ? TEXTW("<") : 0)) ||
++	   (lines > 0 && ev->y >= y && ev->y <= y + h))) {
++		insert(NULL, -cursor);
++		drawmenu();
++		return;
++	}
++	/* middle-mouse click: paste selection */
++	if (ev->button == Button2) {
++		XConvertSelection(dpy, (ev->state & ShiftMask) ? clip : XA_PRIMARY,
++		                  utf8, utf8, win, CurrentTime);
++		drawmenu();
++		return;
++	}
++	/* scroll up */
++	if (ev->button == Button4 && prev) {
++		sel = curr = prev;
++		calcoffsets();
++		drawmenu();
++		return;
++	}
++	/* scroll down */
++	if (ev->button == Button5 && next) {
++		sel = curr = next;
++		calcoffsets();
++		drawmenu();
++		return;
++	}
++	if (ev->button != Button1)
++		return;
++	if (ev->state & ~ControlMask)
++		return;
++	if (lines > 0) {
++		/* vertical list: (ctrl)left-click on item */
++		w = mw - x;
++		for (item = curr; item != next; item = item->right) {
++			y += h;
++			if (ev->y >= y && ev->y <= (y + h)) {
++				puts(item->text_output);
++				if (!(ev->state & ControlMask))
++					exit(0);
++				sel = item;
++				if (sel) {
++					sel->out = 1;
++					drawmenu();
++				}
++				return;
++			}
++		}
++	} else if (matches) {
++		/* left-click on left arrow */
++		x += inputw;
++		w = TEXTW("<");
++		if (prev && curr->left) {
++			if (ev->x >= x && ev->x <= x + w) {
++				sel = curr = prev;
++				calcoffsets();
++				drawmenu();
++				return;
++			}
++		}
++		/* horizontal list: (ctrl)left-click on item */
++		for (item = curr; item != next; item = item->right) {
++			x += w;
++			w = MIN(TEXTW(item->text), mw - x - TEXTW(">"));
++			if (ev->x >= x && ev->x <= x + w) {
++				puts(item->text_output);
++				if (!(ev->state & ControlMask))
++					exit(0);
++				sel = item;
++				if (sel) {
++					sel->out = 1;
++					drawmenu();
++				}
++				return;
++			}
++		}
++		/* left-click on right arrow */
++		w = TEXTW(">");
++		x = mw - w;
++		if (next && ev->x >= x && ev->x <= x + w) {
++			sel = curr = next;
++			calcoffsets();
++			drawmenu();
++			return;
++		}
++	}
++}
++
++static void
++motionevent(XButtonEvent *ev)
++{
++	struct item *it;
++	int xy, ev_xy;
++
++	if (ev->window != win || matches == 0)
++		return;
++
++	xy = lines > 0 ? bh : inputw + promptw + TEXTW("<");
++	ev_xy = lines > 0 ? ev->y : ev->x;
++	for (it = curr; it && it != next; it = it->right) {
++		int wh = lines > 0 ? bh : textw_clamp(it->text, mw - xy - TEXTW(">"));
++		if (ev_xy >= xy && ev_xy < (xy + wh)) {
++			sel = it;
++			calcoffsets();
++			drawmenu();
++			break;
++		}
++		xy += wh;
++	}
++}
++
++static void
+ paste(void)
+ {
+ 	char *p, *q;
+@@ -548,7 +690,7 @@
+ static void
+ readstdin(void)
+ {
+-	char *line = NULL;
++	char *p, *line = NULL;
+ 	size_t i, itemsiz = 0, linesiz = 0;
+ 	ssize_t len;
+ 
+@@ -564,6 +706,19 @@
+ 		if (!(items[i].text = strdup(line)))
+ 			die("strdup:");
+ 
++		if (separator && (p = sepchr(items[i].text, separator)) != NULL) {
++			*p = '\0';
++			items[i].text_output = ++p;
++		} else {
++			items[i].text_output = items[i].text;
++		}
++		if (separator_reverse) {
++			p = items[i].text;
++			items[i].text = items[i].text_output;
++			items[i].text_output = p;
++		}
++
++
+ 		items[i].out = 0;
+ 	}
+ 	free(line);
+@@ -586,6 +741,12 @@
+ 				break;
+ 			cleanup();
+ 			exit(1);
++		case ButtonPress:
++			buttonpress(&ev);
++			break;
++		case MotionNotify:
++			motionevent(&ev.xbutton);
++			break;
+ 		case Expose:
+ 			if (ev.xexpose.count == 0)
+ 				drw_map(drw, win, 0, 0, mw, mh);
+@@ -662,9 +823,9 @@
+ 				if (INTERSECT(x, y, 1, 1, info[i]) != 0)
+ 					break;
+ 
+-		x = info[i].x_org;
+-		y = info[i].y_org + (topbar ? 0 : info[i].height - mh);
+-		mw = info[i].width;
++		x = info[i].x_org + dmx;
++		y = info[i].y_org + (topbar ? dmy : info[i].height - mh - dmy);
++		mw = (dmw>0 ? dmw : info[i].width);;
+ 		XFree(info);
+ 	} else
+ #endif
+@@ -672,9 +833,9 @@
+ 		if (!XGetWindowAttributes(dpy, parentwin, &wa))
+ 			die("could not get embedding window attributes: 0x%lx",
+ 			    parentwin);
+-		x = 0;
+-		y = topbar ? 0 : wa.height - mh;
+-		mw = wa.width;
++		x = dmx;
++		y = topbar ? dmy : wa.height - mh - dmy;
++		mw = (dmw>0 ? dmw : wa.width);
+ 	}
+ 	promptw = (prompt && *prompt) ? TEXTW(prompt) - lrpad / 4 : 0;
+ 	inputw = mw / 3; /* input width: ~33% of monitor width */
+@@ -683,7 +844,9 @@
+ 	/* create menu window */
+ 	swa.override_redirect = True;
+ 	swa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+-	swa.event_mask = ExposureMask | KeyPressMask | VisibilityChangeMask;
++	swa.event_mask = ExposureMask | KeyPressMask | VisibilityChangeMask |
++	                 ButtonPressMask | PointerMotionMask;
++
+ 	win = XCreateWindow(dpy, root, x, y, mw, mh, 0,
+ 	                    CopyFromParent, CopyFromParent, CopyFromParent,
+ 	                    CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
+@@ -716,7 +879,9 @@
+ usage(void)
+ {
+ 	die("usage: dmenu [-bfiv] [-l lines] [-p prompt] [-fn font] [-m monitor]\n"
+-	    "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]");
++	      "             [-x xoffset] [-y yoffset] [-z width]\n"
++	    "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n"
++	    "             [-d separator] [-D separator]");
+ }
+ 
+ int
+@@ -742,6 +907,12 @@
+ 		/* these options take one argument */
+ 		else if (!strcmp(argv[i], "-l"))   /* number of lines in vertical list */
+ 			lines = atoi(argv[++i]);
++		else if (!strcmp(argv[i], "-x"))   /* window x offset */
++			dmx = atoi(argv[++i]);
++		else if (!strcmp(argv[i], "-y"))   /* window y offset (from bottom up if -b) */
++			dmy = atoi(argv[++i]);
++		else if (!strcmp(argv[i], "-z"))   /* make dmenu this wide */
++			dmw = atoi(argv[++i]);
+ 		else if (!strcmp(argv[i], "-m"))
+ 			mon = atoi(argv[++i]);
+ 		else if (!strcmp(argv[i], "-p"))   /* adds prompt to left of input field */
+@@ -758,6 +929,12 @@
+ 			colors[SchemeSel][ColFg] = argv[++i];
+ 		else if (!strcmp(argv[i], "-w"))   /* embedding window id */
+ 			embed = argv[++i];
++		else if (!strcmp(argv[i], "-d") || /* field separator */
++		         !strcmp(argv[i], "-D")) {
++			sepchr = argv[i][1] == 'D' ? strrchr : strchr;
++			separator = argv[++i][0];
++			separator_reverse = argv[i][1] == '|';
++		}
+ 		else
+ 			usage();
+ 
