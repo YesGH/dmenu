@@ -49,6 +49,7 @@ static struct item *items = NULL;
 static struct item *matches, *matchend;
 static struct item *prev, *curr, *next, *sel;
 static int mon = -1, screen;
+static int use_cursor_pos = 0;  // 是否使用光标位置作为菜单原点
 
 static Atom clip, utf8;
 static Display *dpy;
@@ -62,6 +63,20 @@ static Clr *scheme[SchemeLast];
 
 static int (*fstrncmp)(const char *, const char *, size_t) = strncmp;
 static char *(*fstrstr)(const char *, const char *) = strstr;
+
+// 新增：13lines获取光标位置
+static void
+get_cursor_position(int *x, int *y)
+{
+    Window root_return, child_return;
+    int win_x, win_y;
+    unsigned int mask;
+
+    if (!XQueryPointer(dpy, root, &root_return, &child_return,
+                       x, y, &win_x, &win_y, &mask)) {
+        die("failed to get cursor position");
+    }
+}
 
 static unsigned int
 textw_clamp(const char *str, unsigned int n)
@@ -106,7 +121,7 @@ cleanup(void)
 {
 	size_t i;
 
-	XUngrabKey(dpy, AnyKey, AnyModifier, root);
+	XUngrabKeyboard(dpy, CurrentTime);
 	for (i = 0; i < SchemeLast; i++)
 		free(scheme[i]);
 	for (i = 0; items && items[i].text; ++i)
@@ -823,8 +838,15 @@ setup(void)
 				if (INTERSECT(x, y, 1, 1, info[i]) != 0)
 					break;
 
-		x = info[i].x_org + dmx;
-		y = info[i].y_org + (topbar ? dmy : info[i].height - mh - dmy);
+		// 修改：6l 启用光标位置时覆盖坐标
+		if (use_cursor_pos) {
+			get_cursor_position(&x, &y);
+			x += dmx;
+			y += (topbar ? dmy : info[i].height - mh - dmy);
+		} else {
+ 			x = info[i].x_org + dmx;
+			y = info[i].y_org + (topbar ? dmy : info[i].height - mh - dmy);
+		}
 		mw = (dmw>0 ? dmw : info[i].width);;
 		XFree(info);
 	} else
@@ -833,8 +855,15 @@ setup(void)
 		if (!XGetWindowAttributes(dpy, parentwin, &wa))
 			die("could not get embedding window attributes: 0x%lx",
 			    parentwin);
-		x = dmx;
-		y = topbar ? dmy : wa.height - mh - dmy;
+		// 修改6l：启用光标位置时覆盖坐标
+		if (use_cursor_pos) {
+			get_cursor_position(&x, &y);
+			x += dmx;
+			y += (topbar ? dmy : wa.height - mh - dmy);
+		} else {
+			x = dmx;
+			y = topbar ? dmy : wa.height - mh - dmy;
+		}
 		mw = (dmw>0 ? dmw : wa.width);
 	}
 	promptw = (prompt && *prompt) ? TEXTW(prompt) - lrpad / 4 : 0;
@@ -851,7 +880,6 @@ setup(void)
 	                    CopyFromParent, CopyFromParent, CopyFromParent,
 	                    CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
 	XSetClassHint(dpy, win, &ch);
-
 
 	/* input methods */
 	if ((xim = XOpenIM(dpy, NULL, NULL, NULL)) == NULL)
@@ -878,10 +906,12 @@ setup(void)
 static void
 usage(void)
 {
-	die("usage: dmenu [-bfiv] [-l lines] [-p prompt] [-fn font] [-m monitor]\n"
-	      "             [-x xoffset] [-y yoffset] [-z width]\n"
-	    "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n"
-	    "             [-d separator] [-D separator]");
+    die("usage: dmenu [-bfiv] [-l lines] [-p prompt] [-fn font] [-M monitor]\n"
+          "             [-m] [-x xoffset] [-y yoffset] [-z width]\n"
+          "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n"
+          "             [-d separator] [-D separator]\n"
+          "       -m: use cursor position as menu origin (x/y offset by -x/-y)\n"
+          "       -M: specify monitor number (original -m behavior)");
 }
 
 int
@@ -913,8 +943,10 @@ main(int argc, char *argv[])
 			dmy = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "-z"))   /* make dmenu this wide */
 			dmw = atoi(argv[++i]);
-		else if (!strcmp(argv[i], "-m"))
-			mon = atoi(argv[++i]);
+                else if (!strcmp(argv[i], "-m"))   // 新：启用光标位置作为菜单原点
+                        use_cursor_pos = 1;
+                else if (!strcmp(argv[i], "-M"))   // 原 -m 功能（指定显示器），改为 -M
+                        mon = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "-p"))   /* adds prompt to left of input field */
 			prompt = argv[++i];
 		else if (!strcmp(argv[i], "-fn"))  /* font or font set */
