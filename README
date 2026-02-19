@@ -1,7 +1,7 @@
 Dmenu-
 
-Add the funtion for mouse drive the menu and menu made by yourself.
-增加了鼠标驱动原有菜单和自编菜单，键盘鼠标两用。
+Base on suckless's dmenu-5.4, add the function for mouse drive, multi-lever-menu and movable display.
+suckless dmenu-5.4 基础上增加了鼠标驱动原有菜单和自编菜单，支持多级菜单，菜单移动显示，键盘鼠标两用。
 
 
 
